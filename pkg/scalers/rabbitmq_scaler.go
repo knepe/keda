@@ -28,9 +28,10 @@ const (
 )
 
 const (
-	httpProtocol    = "http"
-	amqpProtocol    = "amqp"
-	defaultProtocol = amqpProtocol
+	httpProtocol      = "http"
+	amqpProtocol      = "amqp"
+	defaultProtocol   = amqpProtocol
+	defaultMetricType = v2beta2.AverageValueMetricType
 )
 
 type rabbitMQScaler struct {
@@ -44,6 +45,7 @@ type rabbitMQMetadata struct {
 	queueLength int
 	host        string // connection string for either HTTP or AMQP protocol
 	protocol    string // either http or amqp protocol
+	Type        v2beta2.MetricTargetType
 }
 
 type queueInfo struct {
@@ -118,6 +120,16 @@ func parseRabbitMQMetadata(config *ScalerConfig) (*rabbitMQMetadata, error) {
 		meta.queueLength = queueLength
 	} else {
 		meta.queueLength = defaultRabbitMQQueueLength
+	}
+
+	// Resolve metric type
+	if val, ok := config.TriggerMetadata["type"]; ok && val != "" {
+		if val != string(v2beta2.AverageValueMetricType) && val != string(v2beta2.ValueMetricType) {
+			return nil, fmt.Errorf("unsupport type %s, valid values are AverageValue and Value", val)
+		}
+		meta.Type = v2beta2.MetricTargetType(val)
+	} else {
+		meta.Type = defaultMetricType
 	}
 
 	return &meta, nil
@@ -224,14 +236,26 @@ func (s *rabbitMQScaler) getQueueInfoViaHTTP() (*queueInfo, error) {
 // GetMetricSpecForScaling returns the MetricSpec for the Horizontal Pod Autoscaler
 func (s *rabbitMQScaler) GetMetricSpecForScaling() []v2beta2.MetricSpec {
 	targetMetricValue := resource.NewQuantity(int64(s.metadata.queueLength), resource.DecimalSI)
+
+	metricTarget := v2beta2.MetricTarget{}
+	switch s.metadata.Type {
+	case v2beta2.ValueMetricType:
+		metricTarget = v2beta2.MetricTarget{
+			Type:  v2beta2.ValueMetricType,
+			Value: targetMetricValue,
+		}
+	default:
+		metricTarget = v2beta2.MetricTarget{
+			Type:         v2beta2.AverageValueMetricType,
+			AverageValue: targetMetricValue,
+		}
+	}
+
 	externalMetric := &v2beta2.ExternalMetricSource{
 		Metric: v2beta2.MetricIdentifier{
 			Name: kedautil.NormalizeString(fmt.Sprintf("%s-%s", "rabbitmq", s.metadata.queueName)),
 		},
-		Target: v2beta2.MetricTarget{
-			Type:  v2beta2.ValueMetricType,
-			Value: targetMetricValue,
-		},
+		Target: metricTarget,
 	}
 	metricSpec := v2beta2.MetricSpec{
 		External: externalMetric, Type: rabbitMetricType,
